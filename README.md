@@ -29,7 +29,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 恰好frontend/backend/worker/db/redis五服务，均有healthcheck与healthy依赖；数据库、Redis和共享心跳产物具名卷。演示清理 `docker compose down -v --remove-orphans`，保留数据时省略 `-v`。
 
-目录：`backend/src/{models,schemas,services,controllers,routes}`按六实体分层；`services/paired_data.py`校验CSV，`deming.py`与`agreement.py`计算；`config,utils,middlewares`包含数据库、JWT/口令摘要、队列、审计、错误。种子在 `backend/scripts/seed_demo.py`，`migrations/001_schema.sql`说明新库基线，实际启动用元数据建表。前端 `src/{api,stores,types,constants,hooks,utils,router,pages}`，共享AgreementPlot与CalibrationMetrics用于总览/结果/报告，PairTable用于观测/结果。
+目录：`backend/src/{models,schemas,services,controllers,routes}`按六实体分层；`services/paired_data.py`校验CSV，`deming.py`、`agreement.py`（原差值）与`log_agreement.py`（ln(Y/X)对数比值）计算；`config,utils,middlewares`包含数据库、JWT/口令摘要、队列、审计、错误。种子在 `backend/scripts/seed_demo.py`，`migrations/001_schema.sql`说明新库基线、`migrations/002_agreement_method.sql`为存量库增加分析方式与相对容差列，实际启动用元数据建表。前端 `src/{api,stores,types,constants,hooks,utils,router,pages}`，共享AgreementPlot与CalibrationMetrics用于总览/结果/报告，PairTable用于观测/结果。
 
 测试、截图和日志在批次外层 `test-artifacts/gb-2302`，不进入本源码目录。
 
@@ -63,19 +63,21 @@ Deming模型为 `y=intercept+slope*x`，**λ=var(y测量误差)/var(x测量误�
 
 Bland–Altman差值固定为 **d=y−x**，横轴m=(x+y)/2，偏倚=mean(d)，样本SD按ddof=1，界限为mean(d)±1.96×sample_sd。它描述在差值近似正态、观测独立且方差口径适用时的近似覆盖范围，**不是置信区间**，也不证明设备可互换。差值常量时SD=0、上下界相同是实际计算结果，不伪造不确定性。
 
-比例偏倚另用OLS拟合 `d=alpha+beta*m`，报告系数与描述性R²，不输出未经检验的p值或因果判断。均值读数m常量时返回不可估计/null及原因；差值常量时R²不可定义返回null。讨论容差±t只是使用者输入的领域阈值，不改变BA界限，也不自动给出合格/互换结论。
+研究可在两种一致性口径间选择，结果与归档快照都带 `analysis_method` 字段：`difference`（原差值，历史研究默认）与 `log_ratio`（对数比值）。**对数比值分析**把每对样本变换为 **z=ln(Y/X)**、横轴取对数几何均值g=(ln X+ln Y)/2，在对数尺度计算偏倚mean(z)与样本SD(ddof=1)，界限为mean(z)±1.96×sample_sd，再指数还原为**几何均比**exp(mean z)与**比值一致性界限**exp(mean(z)±1.96 sd)（无量纲倍数，关于几何均比乘性对称）；逐对按z是否落在对数界限内标记 `outside_loa`。该口径下讨论容差按**相对偏差百分比**解释：|Y/X−1|超过容差分数即 `outside_tolerance`，不再是读数单位的绝对差。对数口径要求两侧读数**全部严格为正**；任一样本含零或负值时ln(Y/X)无定义，整次运行明确落为failed并指出出错配对，不做跳过或加常数修补。**Deming回归始终使用原读数**，不随口径切换做对数变换；对数结果中的Deming拟合值、y方向残差与RMSE仍以原单位表达。
 
-结果保存原始读数、拟合值、y方向残差、均值、差值、界限外和讨论容差外标记。y方向残差RMSE只作残差摘要，不称为Deming的唯一优化目标。
+比例偏倚另用OLS拟合 `d=alpha+beta*m`（对数口径为 `z=alpha+beta*g`），报告系数与描述性R²，不输出未经检验的p值或因果判断。横轴读数常量时返回不可估计/null及原因；差值（对数比值）常量时R²不可定义返回null。讨论容差只是使用者输入的领域阈值，不改变BA界限，也不自动给出合格/互换结论。
+
+结果保存原始读数、拟合值、y方向残差、均值、差值、界限外和讨论容差外标记；对数口径另存逐对ln(Y/X)、Y/X比值与对数几何均值。历史运行结果与已批准报告不含新字段，读取与CSV导出自动按原差值口径回读，列结构保持不变；新报告CSV在表头注释行注明分析方式、单位与容差含义（对数口径为相对偏差百分比，差值口径为同单位绝对差）。
 
 ## 模拟工作日
 
-Seed为固定20261112的240组、三量程、两探头JQ-P17/JQ-P18，单位kPa。模拟X误差SD0.2、Y误差SD0.3，故假设λ=2.25；包含4个刻意偏差点，默认讨论容差±2kPa。
+Seed为固定20261112的240组、三量程、两探头JQ-P17/JQ-P18，单位kPa。模拟X误差SD0.2、Y误差SD0.3，故假设λ=2.25；包含4个刻意偏差点，默认讨论容差±2kPa。种子同时生成原差值研究（demo-run）与对数比值研究（demo-log-run，相对容差±10%），两者Deming均基于同一批原读数。
 
 1. 09:00 导入 `jichuan_probe_pairs_202611.csv`，核对240组、唯一ID与量程。
 2. 09:04 核对两探头序列号、X/Y方向及kPa单位。
 3. 09:08 查阅独立重复测量依据，填写λ=2.25，不将读数方差比误当误差比。
 4. 09:12 保存讨论容差±2kPa，送入Redis后台。
-5. 09:18 同时查看Deming校准线、y=x参考和BA差值图。
+5. 09:18 同时查看Deming校准线、y=x参考和BA差值图；高读数段差值波动增大时切换对数比值研究，查看几何均比与比值界限。
 6. 09:23 检查高量程比例偏倚及界限外配对，记录现场核查建议。
 7. 09:30 分析师提交偏倚复核，管理员核准结论与限制。
 8. 09:35 viewer下载批准快照CSV；结果只留档，不向真实设备写参数。
@@ -86,7 +88,7 @@ Seed为固定20261112的240组、三量程、两探头JQ-P17/JQ-P18，单位kPa�
 
 - 采用MySQL8.4 LTS而非8.0；同属MySQL8家族。
 - Redis列表无worker崩溃租约及自动重投、无取消；新库自动建表没有存量库版本化迁移/回滚。列表最多200条实体。
-- 不处理真实设备通信、单位换算、加权/异方差Deming或重复个体的层次模型；无校准参数CI。比例偏倚仅描述，不自动断言显著性。
+- 不处理真实设备通信、单位换算、加权/异方差Deming或重复个体的层次模型；无校准参数CI。高读数段差值波动随量级增大时提供ln(Y/X)对数比值口径，但这不是异方差Deming的替代；比例偏倚仅描述，不自动断言显著性。
 - 模拟数据不能用于真实设备合格判定；Google Fonts需联网，断网回退字体。
 
 MIT License。真实验收见批次 `test-artifacts/gb-2302/TESTING.md`。
